@@ -1,0 +1,6 @@
+# Формат: A: B C D  (A зависит от B, C, D)
+A: B C
+B: C D
+C: D
+D:
+E: A D
