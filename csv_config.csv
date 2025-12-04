@@ -1,0 +1,5 @@
+parameter,value
+package_name,pandas
+repo_url,pypi.org/pypi/
+test_mode,false
+version,2.3.2

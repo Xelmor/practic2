@@ -1,60 +1,110 @@
 import argparse
-import os
 import sys
+import urllib.request
+import csv
+import gzip
+import re
+import json
 
-def error(msg):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
 
-def main():
-    parser = argparse.ArgumentParser(description="Минимальное CLI-приложение для конфигурации.")
+class CLI_PIP:
+    def __init__(self, input_type: str = 'command_line'):
+        self.input_type = input_type
+        if self.input_type == 'command_line':
+            self.params = self.command_line()
 
-    parser.add_argument("--package", required=True,
-                        help="Имя анализируемого пакета.")
+        if self.input_type == 'csv_file':
+            self.params = self.csv_file()
 
-    parser.add_argument("--repo", required=True,
-                        help="URL-адрес репозитория или путь к файлу тестового репозитория.")
+    def csv_file(self):
+        params = {}
+        try:
+            with open('csv_config.csv', 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    parameter = row['parameter']
+                    value = row['value']
+                    params[parameter] = value
 
-    parser.add_argument("--mode", required=True, choices=["local", "remote"],
-                        help="Режим работы с тестовым репозиторием: local или remote.")
+            if not params['package_name']:
+                raise ValueError('package_name cannot be empty')
 
-    parser.add_argument("--version", required=True,
-                        help="Версия пакета.")
+            if not params['repo_url']:
+                raise ValueError('repo_url')
 
-    parser.add_argument("--filter", required=True,
-                        help="Подстрока для фильтрации пакетов.")
+            return params
 
-    args = parser.parse_args()
+        except:
+            raise FileNotFoundError('csv_config.csv file not found')
 
-    # ---- ОБРАБОТКА ОШИБОК ----
+    def print_params(self):
+        print(f"Имя пакета: {self.params['package_name']}")
+        print(f"Репозиторий: {self.params['repo_url']}")
+        print(f"Тестовый режим: {self.params['test_mode']}")
+        print(f"Версия: {self.params['version']}")
 
-    # package: должно быть непустым словом
-    if not args.package.strip():
-        error("Имя пакета не может быть пустым.")
+    def load_package_info(self, name='pandas', version: str = '') -> dict:
+        if not version or version == "latest":
+            url = f"https://{self.params['repo_url']}{name}/json"
+        else:
+            url = f"https://{self.params['repo_url']}{name}/{version}/json"
 
-    # repo: проверяем валидность
-    if args.mode == "local":
-        if not os.path.exists(args.repo):
-            error("Локальный путь к репозиторию не существует.")
-    else:  # remote
-        if not (args.repo.startswith("http://") or args.repo.startswith("https://")):
-            error("Для режима remote репозиторий должен быть корректным URL.")
+        try:
+            with urllib.request.urlopen(url) as response:
+                data = json.loads(response.read().decode('utf-8'))
+            return data
+        except Exception as e:
+            print(f"Ошибка при получении {name}: {e}")
+            sys.exit(1)
 
-    # version: минимальная проверка формата X.Y или X.Y.Z
-    parts = args.version.split(".")
-    if not all(part.isdigit() for part in parts):
-        error("Версия пакета должна состоять из чисел, разделённых точками.")
+    def get_versions(self):
+        package_name = self.params['package_name']
+        package_info = self.load_package_info(package_name)
+        return list(package_info['releases'].keys())
 
-    # filter: непустая строка
-    if not args.filter.strip():
-        error("Подстрока фильтрации не может быть пустой.")
+    def get_dependencies(self):
+        package_name = self.params['package_name']
+        version = self.params['version']
 
-    # ---- ВЫВОД ВСЕХ ПАРАМЕТРОВ ----
-    print("package =", args.package)
-    print("repo =", args.repo)
-    print("mode =", args.mode)
-    print("version =", args.version)
-    print("filter =", args.filter)
+        package_info = self.load_package_info(package_name, version)
+        version_info = package_info['info']
 
-if __name__ == "__main__":
-    main()
+        # "requires_dist" содержит прямые зависимости
+        requires_dist = version_info.get('requires_dist', [])
+        deps = self.parse_dependencies(requires_dist)
+
+        #ЭТАП 2: выводим зависимости
+        print("\nПрямые зависимости пакета:")
+        if not deps:
+            print("  Пакет не имеет зависимостей.")
+        else:
+            for name, ver in deps:
+                if ver:
+                    print(f"  {name} ({ver})")
+                else:
+                    print(f"  {name}")
+
+    def parse_dependencies(self, dependencies):
+        pattern = r"(^[a-zA-Z\d_-]+)\s*(>=|<=|==|!=|~=|<|>)?\s*([\d\.-_]*)"
+        deps = set()
+        result = set()
+
+        for dep in dependencies:
+            if 'extra' in dep:
+                continue  # игнорируем extras
+
+            dep_str = dep.strip().split(';')[0]
+            match = re.match(pattern, dep_str)
+
+            if match:
+                name = match.group(1)
+                version = match.group(3) if match.group(3) else None
+
+                if name not in deps:
+                    deps.add(name)
+                    result.add((name, version))
+
+        return result
+
+cl = CLI_PIP('csv_file')
+cl.get_dependencies()
