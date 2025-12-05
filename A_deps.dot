@@ -1,0 +1,9 @@
+digraph dependencies {
+    "A" -> "C";
+    "A" -> "B";
+    "C" -> "D";
+    "C" -> "E";
+    "E";
+    "D";
+    "B" -> "D";
+}

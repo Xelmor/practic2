@@ -1,9 +1,8 @@
 parameter,value
-package_name,C
+package_name,pandas
 repo_url,pypi.org/pypi
-version,
+version,2.2.0
 ignore_substring,
-max_depth,5
+max_depth,3
 mode,real
-test_mode,true
 test_file_path,test_repo.txt

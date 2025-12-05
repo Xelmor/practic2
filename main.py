@@ -1,196 +1,105 @@
-import csv
-import json
-import re
-import sys
-import urllib.request
+import os
+import subprocess
+import webbrowser
 
-
-class CLI_PIP:
-    def __init__(self, input_type: str = 'csv_file'):
-        self.input_type = input_type
-        if self.input_type == 'csv_file':
-            self.params = self.csv_file()
-        else:
-            raise ValueError("Сейчас поддерживается только режим 'csv_file'")
-    def csv_file(self):
-        params = {}
-        try:
-            with open('csv_config.csv', 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    parameter = row['parameter']
-                    value = row['value']
-                    params[parameter] = value
-
-            if not params.get('package_name'):
-                raise ValueError('package_name cannot be empty')
-
-            if not params.get('repo_url'):
-                raise ValueError('repo_url cannot be empty')
-
-            return params
-
-        except FileNotFoundError:
-            print('ERROR: csv_config.csv file not found', file=sys.stderr)
-            sys.exit(1)
-
-    def load_package_info(self, name: str, version: str = '') -> dict:
-        repo_url = self.params['repo_url'].rstrip('/')
-        if not version or version == "latest":
-            url = f"https://{repo_url}/{name}/json"
-        else:
-            url = f"https://{repo_url}/{name}/{version}/json"
-
-        try:
-            with urllib.request.urlopen(url) as response:
-                data = json.loads(response.read().decode('utf-8'))
-            return data
-        except Exception as e:
-            print(f"Ошибка при получении {name}: {e}", file=sys.stderr)
-            return {"info": {"requires_dist": []}}
-
-    def parse_dependencies(self, dependencies):
-        pattern = r"(^[a-zA-Z\d_-]+)"
-        deps = set()
-
-        if not dependencies:
-            return deps
-
-        for dep in dependencies:
-            dep_clean = dep.strip().split(';')[0]
-            match = re.match(pattern, dep_clean)
-            if match:
-                deps.add(match.group(1))
-
-        return deps
-
-    def get_direct_dependencies(self, name: str, version: str = ''):
-        info = self.load_package_info(name, version)
-        requires = info.get("info", {}).get("requires_dist", [])
-        return self.parse_dependencies(requires)
-
-    def print_direct_dependencies(self):
-        pkg = self.params["package_name"]
-        ver = self.params["version"]
-
-        deps = self.get_direct_dependencies(pkg, ver)
-
-        print("Прямые зависимости пакета:")
-        if not deps:
-            print("  (нет зависимостей)")
-        else:
-            for d in sorted(deps):
-                print(" ", d)
-
-
-    def _load_test_graph(self, path: str):
-        graph = {}
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'):
-                        continue
-                    pkg, deps = line.split(':')
-                    pkg = pkg.strip()
-                    deps_list = deps.strip().split() if deps.strip() else []
-                    graph[pkg] = deps_list
-        except:
-            print(f"Ошибка загрузки тестового файла {path}")
-            sys.exit(1)
-        return graph
-
-    def build_dependency_graph(self):
-        pkg = self.params["package_name"]
-        ver = self.params["version"]
-        max_depth = int(self.params.get("max_depth", "3"))
-        ignore = self.params.get("ignore_substring", "")
-        test_mode = self.params.get("test_mode", "false").lower() == "true"
-        test_file = self.params.get("test_file_path", "test_repo.txt")
-
-        graph = {}
-        cycles = []
-        visited = set()
-
-        test_graph = self._load_test_graph(test_file) if test_mode else None
-
-        stack = [(pkg, 0, [pkg])]
-
-        while stack:
-            node, depth, path = stack.pop()
-
-            if depth > max_depth:
-                continue
-            if ignore and ignore in node:
-                continue
-            if node in visited:
-                continue
-
-            visited.add(node)
-            graph.setdefault(node, set())
-
-            if test_mode:
-                deps = test_graph.get(node, [])
-            else:
-                deps = (
-                    self.get_direct_dependencies(node, ver)
-                    if node == pkg else
-                    self.get_direct_dependencies(node, "")
-                )
-
-            deps = [d for d in deps if not ignore or ignore not in d]
-
-            for d in deps:
-                if d in path:
-                    cycles.append(path + [d])
+def load_test_graph(path: str = "test_repo.txt"):
+    graph = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
                     continue
 
-                graph[node].add(d)
-                stack.append((d, depth + 1, path + [d]))
+                # Разделяем на 'пакет: зависимости'
+                parts = line.split(":")
+                pkg = parts[0].strip()
+                deps = []
+                if len(parts) > 1 and parts[1].strip():
+                    deps = parts[1].strip().split()
 
-        print("\nГраф зависимостей (до глубины", max_depth, "):")
-        for node in sorted(graph.keys()):
-            d = sorted(graph[node])
-            if d:
-                print(f"  {node} -> {', '.join(d)}")
-            else:
-                print(f"  {node} -> (нет зависимостей)")
+                graph[pkg] = deps
+    except FileNotFoundError:
+        print(f"ОШИБКА: файл тестового репозитория '{path}' не найден.")
+        exit(1)
 
-        if cycles:
-            print("\nОбнаружены циклы зависимостей:")
-            for c in cycles:
-                print("  " + " -> ".join(c))
+    return graph
+def build_dependency_subgraph(full_graph: dict, root: str, max_depth: int = 10):
+    subgraph = {}
+    stack = [(root, 0)]
+    visited = set()
+
+    while stack:
+        node, depth = stack.pop()
+        if depth > max_depth:
+            continue
+
+        if node in visited:
+            continue
+        visited.add(node)
+
+        deps = full_graph.get(node, [])
+        subgraph.setdefault(node, set())
+
+        for d in deps:
+            subgraph[node].add(d)
+            stack.append((d, depth + 1))
+
+    return subgraph
+
+def save_graphviz(graph: dict, filename: str):
+    lines = ["digraph dependencies {"]
+
+    for pkg, deps in graph.items():
+        if not deps:
+            lines.append(f'    "{pkg}";')
         else:
-            print("\nЦиклы зависимостей не обнаружены.")
-
-    def print_reverse_dependencies(self):
-        test_mode = self.params.get("test_mode", "false").lower() == "true"
-        test_file = self.params.get("test_file_path", "test_repo.txt")
-
-        if not test_mode:
-            print("\nОбратные зависимости доступны только при test_mode=true")
-            return
-
-        graph = self._load_test_graph(test_file)
-
-        reverse_graph = {pkg: [] for pkg in graph}
-
-        for pkg, deps in graph.items():
             for d in deps:
-                reverse_graph.setdefault(d, [])
-                reverse_graph[d].append(pkg)
+                lines.append(f'    "{pkg}" -> "{d}";')
 
-        print("\nОБРАТНЫЕ ЗАВИСИМОСТИ:")
-        for pkg in sorted(reverse_graph.keys()):
-            rev = reverse_graph[pkg]
-            if rev:
-                print(f"  {pkg} <- {', '.join(sorted(rev))}")
-            else:
-                print(f"  {pkg} <- (нет зависимых пакетов)")
+    lines.append("}")
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+def generate_png(dot_file: str, png_file: str):
+    cmd = ["dot", "-Tpng", dot_file, "-o", png_file]
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"PNG создан: {png_file}")
+    except Exception as e:
+        print("ОШИБКА запуска Graphviz (dot):", e)
+
+def visualize_stage_5():
+    full_graph = load_test_graph("test_repo.txt")
+    roots = ["A", "B", "C"]
+
+    print("Пакеты в тестовом репозитории:", ", ".join(sorted(full_graph.keys())))
+    print("Будем визуализировать для пакетов:", ", ".join(roots))
+
+    for root in roots:
+        if root not in full_graph:
+            print(f"\n[ПРОПУСК] Пакет {root} отсутствует в test_repo.txt")
+            continue
+
+        print(f"\n=== Строим граф для пакета {root} ===")
+
+        subgraph = build_dependency_subgraph(full_graph, root, max_depth=10)
+
+        dot_file = f"{root}_deps.dot"
+        png_file = f"{root}_deps.png"
+
+        save_graphviz(subgraph, dot_file)
+        print(f"Graphviz-файл создан: {dot_file}")
+
+        generate_png(dot_file, png_file)
+
+        if os.path.exists(png_file):
+            try:
+                webbrowser.open(os.path.abspath(png_file))
+                print(f"Открываю: {png_file}")
+            except Exception as e:
+                print("Не удалось автоматически открыть PNG:", e)
 
 if __name__ == "__main__":
-    analyzer = CLI_PIP('csv_file')
-
-    analyzer.print_direct_dependencies()
-    analyzer.build_dependency_graph()
-    analyzer.print_reverse_dependencies()
+    visualize_stage_5()
