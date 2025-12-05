@@ -12,7 +12,6 @@ class CLI_PIP:
             self.params = self.csv_file()
         else:
             raise ValueError("Сейчас поддерживается только режим 'csv_file'")
-
     def csv_file(self):
         params = {}
         try:
@@ -48,49 +47,41 @@ class CLI_PIP:
             return data
         except Exception as e:
             print(f"Ошибка при получении {name}: {e}", file=sys.stderr)
-            sys.exit(1)
+            return {"info": {"requires_dist": []}}
 
     def parse_dependencies(self, dependencies):
-        """
-        dependencies: список строк из requires_dist
-        Возвращает множество имён пакетов-зависимостей.
-        """
-        pattern = r"(^[a-zA-Z\d_-]+)\s*(>=|<=|==|!=|~=|<|>)?\s*([\d\.-_]*)"
+        pattern = r"(^[a-zA-Z\d_-]+)"
         deps = set()
 
-        for dep in dependencies:
-            if 'extra' in dep:
-                # Игнорируем optional extras
-                continue
+        if not dependencies:
+            return deps
 
-            dep_str = dep.strip().split(';')[0]
-            match = re.match(pattern, dep_str)
+        for dep in dependencies:
+            dep_clean = dep.strip().split(';')[0]
+            match = re.match(pattern, dep_clean)
             if match:
-                package_name = match.group(1)
-                deps.add(package_name)
+                deps.add(match.group(1))
 
         return deps
 
     def get_direct_dependencies(self, name: str, version: str = ''):
-        package_info = self.load_package_info(name, version)
-        info = package_info['info']
-        requires_dist = info.get('requires_dist', []) or []
-        deps = self.parse_dependencies(requires_dist)
-        return deps
+        info = self.load_package_info(name, version)
+        requires = info.get("info", {}).get("requires_dist", [])
+        return self.parse_dependencies(requires)
 
     def print_direct_dependencies(self):
-        """Вывод прямых зависимостей (как на этапе 2)."""
-        package_name = self.params['package_name']
-        version = self.params['version']
+        pkg = self.params["package_name"]
+        ver = self.params["version"]
 
-        deps = self.get_direct_dependencies(package_name, version)
+        deps = self.get_direct_dependencies(pkg, ver)
 
         print("Прямые зависимости пакета:")
         if not deps:
-            print("  Пакет не имеет зависимостей.")
+            print("  (нет зависимостей)")
         else:
             for d in sorted(deps):
-                print(f"  {d}")
+                print(" ", d)
+
 
     def _load_test_graph(self, path: str):
         graph = {}
@@ -100,92 +91,70 @@ class CLI_PIP:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    parts = line.split(':')
-                    pkg = parts[0].strip()
-                    deps = []
-                    if len(parts) > 1 and parts[1].strip():
-                        deps = parts[1].strip().split()
-                    graph[pkg] = deps
-        except FileNotFoundError:
-            print(f"ERROR: test graph file '{path}' not found", file=sys.stderr)
+                    pkg, deps = line.split(':')
+                    pkg = pkg.strip()
+                    deps_list = deps.strip().split() if deps.strip() else []
+                    graph[pkg] = deps_list
+        except:
+            print(f"Ошибка загрузки тестового файла {path}")
             sys.exit(1)
-
         return graph
 
     def build_dependency_graph(self):
-        package_name = self.params['package_name']
-        version = self.params['version']
+        pkg = self.params["package_name"]
+        ver = self.params["version"]
+        max_depth = int(self.params.get("max_depth", "3"))
+        ignore = self.params.get("ignore_substring", "")
+        test_mode = self.params.get("test_mode", "false").lower() == "true"
+        test_file = self.params.get("test_file_path", "test_repo.txt")
 
-        max_depth = int(self.params.get('max_depth', '3'))
-        ignore_substring = self.params.get('ignore_substring', '')
-        test_mode = self.params.get('test_mode', 'false').lower() == 'true'
-        test_file_path = self.params.get('test_file_path', 'test_repo.txt')
-
-        # граф, который мы построим
         graph = {}
         cycles = []
-
-        # если test_mode, заранее загружаем тестовый граф
-        test_graph = None
-        if test_mode:
-            test_graph = self._load_test_graph(test_file_path)
-
-        # стек для DFS: (node, depth, path)
-        stack = [(package_name, 0, [package_name])]
         visited = set()
+
+        test_graph = self._load_test_graph(test_file) if test_mode else None
+
+        stack = [(pkg, 0, [pkg])]
 
         while stack:
             node, depth, path = stack.pop()
 
-            # фильтр по глубине
             if depth > max_depth:
                 continue
-
-            # фильтр по подстроке
-            if ignore_substring and ignore_substring in node:
+            if ignore and ignore in node:
                 continue
-
             if node in visited:
                 continue
-            visited.add(node)
 
-            # получаем прямые зависимости для текущего узла
+            visited.add(node)
+            graph.setdefault(node, set())
+
             if test_mode:
                 deps = test_graph.get(node, [])
-                deps = list(deps)
             else:
-                # для корневого пакета учитываем указанную версию
-                if node == package_name:
-                    direct = self.get_direct_dependencies(node, version)
-                else:
-                    # для транзитивных — берём последнюю версию (version не указываем)
-                    direct = self.get_direct_dependencies(node, '')
-                deps = list(direct)
+                deps = (
+                    self.get_direct_dependencies(node, ver)
+                    if node == pkg else
+                    self.get_direct_dependencies(node, "")
+                )
 
-            # фильтрация по подстроке
-            if ignore_substring:
-                deps = [d for d in deps if ignore_substring not in d]
+            deps = [d for d in deps if not ignore or ignore not in d]
 
-            graph.setdefault(node, set())
-            for dep in deps:
-                graph[node].add(dep)
-
-                if dep in path:
-                    # цикл: путь + текущая зависимость
-                    cycles.append(path + [dep])
+            for d in deps:
+                if d in path:
+                    cycles.append(path + [d])
                     continue
 
-                # добавляем в стек следующий уровень
-                stack.append((dep, depth + 1, path + [dep]))
-
+                graph[node].add(d)
+                stack.append((d, depth + 1, path + [d]))
 
         print("\nГраф зависимостей (до глубины", max_depth, "):")
-        for pkg in sorted(graph.keys()):
-            deps = sorted(graph[pkg])
-            if deps:
-                print(f"  {pkg} -> {', '.join(deps)}")
+        for node in sorted(graph.keys()):
+            d = sorted(graph[node])
+            if d:
+                print(f"  {node} -> {', '.join(d)}")
             else:
-                print(f"  {pkg} -> (нет зависимостей)")
+                print(f"  {node} -> (нет зависимостей)")
 
         if cycles:
             print("\nОбнаружены циклы зависимостей:")
@@ -194,11 +163,34 @@ class CLI_PIP:
         else:
             print("\nЦиклы зависимостей не обнаружены.")
 
+    def print_reverse_dependencies(self):
+        test_mode = self.params.get("test_mode", "false").lower() == "true"
+        test_file = self.params.get("test_file_path", "test_repo.txt")
+
+        if not test_mode:
+            print("\nОбратные зависимости доступны только при test_mode=true")
+            return
+
+        graph = self._load_test_graph(test_file)
+
+        reverse_graph = {pkg: [] for pkg in graph}
+
+        for pkg, deps in graph.items():
+            for d in deps:
+                reverse_graph.setdefault(d, [])
+                reverse_graph[d].append(pkg)
+
+        print("\nОБРАТНЫЕ ЗАВИСИМОСТИ:")
+        for pkg in sorted(reverse_graph.keys()):
+            rev = reverse_graph[pkg]
+            if rev:
+                print(f"  {pkg} <- {', '.join(sorted(rev))}")
+            else:
+                print(f"  {pkg} <- (нет зависимых пакетов)")
 
 if __name__ == "__main__":
     analyzer = CLI_PIP('csv_file')
 
     analyzer.print_direct_dependencies()
-
-    # Этап 3: построение графа зависимостей
     analyzer.build_dependency_graph()
+    analyzer.print_reverse_dependencies()
